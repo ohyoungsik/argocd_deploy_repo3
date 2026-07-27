@@ -1,0 +1,12 @@
+replicaCount: 1
+
+image:
+  # image 저장소의 위치는 ECR을 바라보도록함 ( ecr_for_apps 폴더 )
+  repository: 172.16.8.40/library/fortune
+  tag: "latest"
+  pullPolicy: Always
+
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 8000 # FastAPI 포트

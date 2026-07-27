@@ -1,0 +1,310 @@
+pipeline {
+    triggers {
+        GenericTrigger(
+            genericVariables: [
+                [key: 'git_ref', value: '$.ref'],
+                [key: 'repository_name', value: '$.repository.name'],
+                [key: 'repository_full_name', value: '$.repository.full_name'],
+                [key: 'pusher_name', value: '$.pusher.login'],
+                [key: 'commit_message', value: '$.head_commit.message']
+            ],
+            causeString: 'Gitea Push: $repository_full_name / $git_ref / $pusher_name',
+            token: 'test-token-1234',
+            printContributedVariables: true,
+            printPostContent: true,
+            regexpFilterText: '$git_ref $commit_message',
+            regexpFilterExpression: '^refs/heads/master (?!.*\\[ci skip\\])[\\s\\S]*$'
+        )
+    }
+
+    agent {
+        kubernetes {
+            yaml '''
+apiVersion: v1
+kind: Pod
+spec:
+  restartPolicy: Never
+  containers:
+    - name: kaniko-fortune
+      image: gcr.io/kaniko-project/executor:debug
+      imagePullPolicy: IfNotPresent
+      command:
+        - /busybox/sh
+        - -c
+      args:
+        - cat
+      tty: true
+
+    - name: kaniko-greet
+      image: gcr.io/kaniko-project/executor:debug
+      imagePullPolicy: IfNotPresent
+      command:
+        - /busybox/sh
+        - -c
+      args:
+        - cat
+      tty: true
+'''
+        }
+    }
+
+    options {
+        disableConcurrentBuilds()
+        skipDefaultCheckout(true)
+        timestamps()
+    }
+
+    environment {
+        HARBOR_URL = '172.16.8.40'
+        HARBOR_CRED = 'harbor-cred'
+        GITEA_CRED = 'gitea-cred'
+        GITEA_REPO = '172.16.8.42/admin/argocd_deploy.git'
+        IMAGE_TAG = "v${BUILD_NUMBER}"
+    }
+
+    stages {
+        stage('Webhook Information') {
+            steps {
+                script {
+                    echo """
+                    ========================================
+                    Jenkins 실행 정보
+                    ========================================
+                    실행 원인     : ${currentBuild.getBuildCauses()}
+                    저장소        : ${env.repository_full_name ?: '수동 실행'}
+                    브랜치        : ${env.git_ref ?: '수동 실행'}
+                    Push 사용자   : ${env.pusher_name ?: 'Jenkins 사용자'}
+                    커밋 메시지   : ${env.commit_message ?: '수동 실행'}
+                    이미지 태그   : ${env.IMAGE_TAG}
+                    ========================================
+                    """
+                }
+            }
+        }
+
+        stage('Checkout') {
+            steps {
+                checkout scm
+
+                sh '''
+                    set -eu
+                    echo "현재 커밋:"
+                    git log -1 --oneline
+                    echo "변경 파일:"
+                    git show --name-only --pretty="" HEAD
+                '''
+            }
+        }
+
+        stage('Build & Push: Fortune') {
+            when {
+                anyOf {
+                    changeset "hello/apps/fortune/**"
+                    changeset "hello/Jenkinsfile"
+                    triggeredBy 'UserIdCause'
+                }
+            }
+
+            steps {
+                container('kaniko-fortune') {
+                    withCredentials([
+                        usernamePassword(
+                            credentialsId: HARBOR_CRED,
+                            usernameVariable: 'HARBOR_USER',
+                            passwordVariable: 'HARBOR_PASS'
+                        )
+                    ]) {
+                        sh '''
+                            set -eu
+
+                            IMAGE="${HARBOR_URL}/library/fortune:${IMAGE_TAG}"
+                            CONTEXT="${WORKSPACE}/hello/apps/fortune"
+                            DOCKERFILE="${CONTEXT}/Dockerfile"
+
+                            echo "Fortune 이미지 빌드를 시작합니다."
+                            echo "이미지: ${IMAGE}"
+
+                            test -f "${DOCKERFILE}"
+
+                            AUTH=$(printf '%s' "${HARBOR_USER}:${HARBOR_PASS}" | base64 | tr -d '\n')
+                            mkdir -p /kaniko/.docker
+
+                            printf '{"auths":{"%s":{"auth":"%s"}}}\n' \
+                                "${HARBOR_URL}" \
+                                "${AUTH}" \
+                                > /kaniko/.docker/config.json
+
+                            /kaniko/executor \
+                                --context="${CONTEXT}" \
+                                --dockerfile="${DOCKERFILE}" \
+                                --destination="${IMAGE}" \
+                                --insecure \
+                                --verbosity=info
+
+                            echo "Fortune 이미지 Push 완료: ${IMAGE}"
+                        '''
+                    }
+                }
+
+                sh '''
+                    set -eu
+                    sed -i \
+                        '/^fortune:/,/^[^[:space:]]/ {
+                            /^[[:space:]]*tag:/ s|tag:.*|tag: "'"${IMAGE_TAG}"'"|
+                        }' \
+                        hello/values.yaml
+
+                    echo "변경된 Fortune 설정:"
+                    sed -n '/^fortune:/,/^[^[:space:]]/p' hello/values.yaml
+                '''
+            }
+        }
+
+        stage('Build & Push: Greet') {
+            when {
+                anyOf {
+                    changeset "hello/apps/greet/**"
+                    changeset "hello/Jenkinsfile"
+                    triggeredBy 'UserIdCause'
+                }
+            }
+
+            steps {
+                container('kaniko-greet') {
+                    withCredentials([
+                        usernamePassword(
+                            credentialsId: HARBOR_CRED,
+                            usernameVariable: 'HARBOR_USER',
+                            passwordVariable: 'HARBOR_PASS'
+                        )
+                    ]) {
+                        sh '''
+                            set -eu
+
+                            IMAGE="${HARBOR_URL}/library/greet:${IMAGE_TAG}"
+                            CONTEXT="${WORKSPACE}/hello/apps/greet"
+                            DOCKERFILE="${CONTEXT}/Dockerfile"
+
+                            echo "Greet 이미지 빌드를 시작합니다."
+                            echo "이미지: ${IMAGE}"
+
+                            test -f "${DOCKERFILE}"
+
+                            AUTH=$(printf '%s' "${HARBOR_USER}:${HARBOR_PASS}" | base64 | tr -d '\n')
+                            mkdir -p /kaniko/.docker
+
+                            printf '{"auths":{"%s":{"auth":"%s"}}}\n' \
+                                "${HARBOR_URL}" \
+                                "${AUTH}" \
+                                > /kaniko/.docker/config.json
+
+                            /kaniko/executor \
+                                --context="${CONTEXT}" \
+                                --dockerfile="${DOCKERFILE}" \
+                                --destination="${IMAGE}" \
+                                --insecure \
+                                --verbosity=info
+
+                            echo "Greet 이미지 Push 완료: ${IMAGE}"
+                        '''
+                    }
+                }
+
+                sh '''
+                    set -eu
+                    sed -i \
+                        '/^greet:/,/^[^[:space:]]/ {
+                            /^[[:space:]]*tag:/ s|tag:.*|tag: "'"${IMAGE_TAG}"'"|
+                        }' \
+                        hello/values.yaml
+
+                    echo "변경된 Greet 설정:"
+                    sed -n '/^greet:/,/^[^[:space:]]/p' hello/values.yaml
+                '''
+            }
+        }
+
+        stage('Git Push to Gitea') {
+            steps {
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: GITEA_CRED,
+                        usernameVariable: 'GIT_ID',
+                        passwordVariable: 'GIT_PW'
+                    )
+                ]) {
+                    sh '''
+                        set -eu
+
+                        git config user.name "Jenkins-CI"
+                        git config user.email "jenkins@cicd.local"
+                        git add hello/values.yaml
+
+                        if git diff --cached --quiet; then
+                            echo "values.yaml 변경 사항이 없어 Commit과 Push를 생략합니다."
+                            exit 0
+                        fi
+
+                        echo "변경된 values.yaml 내용:"
+                        git diff --cached -- hello/values.yaml
+
+                        git commit -m "chore: update image tags to ${IMAGE_TAG} [ci skip]"
+
+                        ASKPASS_FILE="${WORKSPACE}/.git-askpass.sh"
+
+                        printf '%s\n' \
+                            '#!/bin/sh' \
+                            'case "$1" in' \
+                            '  *Username*) printf "%s\\n" "$GIT_ID" ;;' \
+                            '  *Password*) printf "%s\\n" "$GIT_PW" ;;' \
+                            'esac' \
+                            > "${ASKPASS_FILE}"
+
+                        chmod 700 "${ASKPASS_FILE}"
+
+                        cleanup() {
+                            rm -f "${ASKPASS_FILE}"
+                        }
+                        trap cleanup EXIT
+
+                        GIT_ASKPASS="${ASKPASS_FILE}" \
+                        GIT_TERMINAL_PROMPT=0 \
+                        git push \
+                            "http://${GITEA_REPO}" \
+                            HEAD:master
+
+                        echo "hello/values.yaml을 Gitea master 브랜치에 반영했습니다."
+                    '''
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo """
+            Pipeline 실행 성공!
+
+            이미지 태그: ${IMAGE_TAG}
+
+            확인 대상:
+            - ${HARBOR_URL}/library/fortune:${IMAGE_TAG}
+            - ${HARBOR_URL}/library/greet:${IMAGE_TAG}
+            - Gitea hello/values.yaml
+            """
+        }
+
+        failure {
+            echo """
+            Pipeline 실행에 실패했습니다.
+
+            Jenkins Console Output에서 실패한 Stage와
+            해당 Stage 직전의 오류 메시지를 확인하세요.
+            """
+        }
+
+        always {
+            echo "Pipeline 종료: ${currentBuild.currentResult}"
+        }
+    }
+}
