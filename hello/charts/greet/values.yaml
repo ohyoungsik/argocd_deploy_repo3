@@ -1,7 +1,7 @@
 replicaCount: 1
 
 image:
-  repository: 172.16.8.40/library/greet
+  repository: 718036735682.dkr.ecr.ap-northeast-2.amazonaws.com/hello-apps-greet
   tag: "latest"
   pullPolicy: Always
 

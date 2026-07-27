@@ -2,7 +2,8 @@ replicaCount: 1
 
 image:
   # image 저장소의 위치는 ECR을 바라보도록함 ( ecr_for_apps 폴더 )
-  repository: 172.16.8.40/library/fortune
+  # ecr주소/fortune
+  repository: 718036735682.dkr.ecr.ap-northeast-2.amazonaws.com/hello-apps-fortune
   tag: "latest"
   pullPolicy: Always
 
